@@ -157,7 +157,11 @@ export class Room {
     this.handTimer = null
     this.turnEndsAt = null
     this.turnDurationMs = null
-    this.revealed = new Set() // playerIds who chose to show their hand this hand
+    this.revealed = new Map() // playerId -> indices of the hole cards they chose to show
+    this.revealDeclined = new Set() // playerIds who chose NOT to show this hand
+    this.handEndsAt = null // when the current hand ended (anchor of the reveal window)
+    this.revealEndsAt = null // when the reveal window closes → next hand starts
+    this.revealDurationMs = null
     this.chat = [] // recent chat messages { id, name, text, t }
     this.started = false // has a game ever been started in this room
     this.gameOver = null // settlement payload for the victory screen, set by endGame
@@ -243,16 +247,19 @@ export class Room {
         gp.wins = seatInfo?.wins ?? 0
         gp.icon = seatInfo?.icon
         gp.afk = !!seatInfo?.afk
-        // Reveal: show hole cards + hand name for players who opted in
+        // Reveal: show exactly the hole cards a player chose to display (their
+        // pick of one card or both). The hand name is only exposed on a FULL
+        // reveal — naming it for a single card would leak the hidden one.
         // (AI seats are auto-revealed at hand end, folded or not)
-        if (isHandEnd && this.revealed.has(gp.id)) {
+        const shown = this.revealed.get(gp.id)
+        if (isHandEnd && shown?.length) {
           const ep = epById.get(gp.id)
           if (ep) {
-            gp.hole = ep.hole
-            gp.handName = ep.eval?.name ?? null
+            gp.hole = ep.hole.map((c, i) => (shown.includes(i) ? c : null))
+            if (shown.length >= ep.hole.length) gp.handName = ep.eval?.name ?? null
           }
         }
-        gp.revealed = this.revealed.has(gp.id)
+        gp.revealed = !!shown?.length
       }
 
       game.revealWindow = isHandEnd
@@ -261,8 +268,11 @@ export class Room {
         game.you.wins = seatInfo?.wins ?? 0
         game.you.afk = !!seatInfo?.afk
         game.you.remainingRebuys = this.maxRebuys - (seatInfo?.rebuyCount || 0)
-        game.you.canReveal = isHandEnd && !game.you.folded && !this.revealed.has(playerId)
-        game.you.revealed = this.revealed.has(playerId)
+        const shownYou = this.revealed.get(playerId) ?? []
+        game.you.revealedCards = shownYou
+        game.you.revealDeclined = this.revealDeclined.has(playerId)
+        game.you.canReveal = isHandEnd && shownYou.length < (epById.get(playerId)?.hole.length ?? 0)
+        game.you.revealed = shownYou.length > 0
       }
     }
 
@@ -296,6 +306,8 @@ export class Room {
         ),
         turnEndsAt: this.turnEndsAt,
         turnDurationMs: this.turnDurationMs,
+        revealEndsAt: this.revealEndsAt,
+        revealDurationMs: this.revealDurationMs,
         gameOver: this.gameOver,
         serverTime: Date.now(),
       },
@@ -590,17 +602,68 @@ export class Room {
     }
   }
 
-  // Opt-in reveal: a contestant chooses to show their cards after the hand ends
-  reveal(playerId) {
+  // Opt-in reveal: after a hand ends, a player chooses WHICH hole cards to
+  // show — one specific card, both, or (via declineReveal) none. Folded
+  // players may also show (e.g. to display a bluff); only unfolded human
+  // contestants gate the early start of the next hand.
+  reveal(playerId, { cards } = {}) {
     if (this.phase !== 'playing' || !this.engine || this.engine.phase !== 'handEnd') {
       return { ok: false, error: 'Reveal is only available right after a hand ends' }
     }
     const p = this.engine.playerById(playerId)
-    if (!p || p.folded) return { ok: false, error: 'You cannot reveal a folded hand' }
-    this.revealed.add(playerId)
-    this.addLog(`${p.name} shows their hand`)
+    if (!p) return { ok: false, error: 'You were not in this hand' }
+    const picked = [...new Set((Array.isArray(cards) ? cards : []).map(Number))]
+      .filter((i) => Number.isInteger(i) && i >= 0 && i < p.hole.length)
+      .sort((a, b) => a - b)
+    if (!picked.length) return { ok: false, error: 'Choose at least one card to show' }
+    const merged = [...new Set([...(this.revealed.get(playerId) ?? []), ...picked])].sort((a, b) => a - b)
+    this.revealed.set(playerId, merged)
+    this.revealDeclined.delete(playerId)
+    this.addLog(`${p.name} shows ${merged.map((i) => cardLabel(p.hole[i])).join(' ')}`)
     this.broadcast()
+    this.maybeAdvanceAfterReveal()
+    return { ok: true, revealed: merged }
+  }
+
+  // Explicitly keep the hand hidden. Counting as a decision, it lets the table
+  // move on without waiting out the full reveal window.
+  declineReveal(playerId) {
+    if (this.phase !== 'playing' || !this.engine || this.engine.phase !== 'handEnd') {
+      return { ok: false, error: 'Reveal is only available right after a hand ends' }
+    }
+    const p = this.engine.playerById(playerId)
+    if (!p) return { ok: false, error: 'You were not in this hand' }
+    if ((this.revealed.get(playerId) ?? []).length) {
+      return { ok: false, error: 'You already showed cards' }
+    }
+    this.revealDeclined.add(playerId)
+    this.broadcast()
+    this.maybeAdvanceAfterReveal()
     return { ok: true }
+  }
+
+  // Close the reveal window early once every human contestant still seated has
+  // decided (shown any cards or declined): the next hand starts after a short
+  // grace, but never sooner than the minimum result display time. With no
+  // pending humans this runs right at hand end, restoring the short pause.
+  maybeAdvanceAfterReveal() {
+    if (!this.engine || this.phase !== 'playing' || this.engine.phase !== 'handEnd') return
+    const decided = (id) => (this.revealed.get(id) ?? []).length > 0 || this.revealDeclined.has(id)
+    const pendingContestant = this.engine.players.some((ep) => {
+      if (ep.folded || ep.isBot) return false
+      const seatP = this.seats[ep.seat]
+      return seatP?.id === ep.id && !seatP.isBot && !decided(ep.id)
+    })
+    if (pendingContestant) return
+    const floor = this.handEndsAt + CONFIG.HAND_END_PAUSE_MS
+    this.revealEndsAt = Math.max(floor, Math.min(this.revealEndsAt, Date.now() + 2000))
+    this.revealDurationMs = this.revealEndsAt - this.handEndsAt
+    if (this.handTimer) clearTimeout(this.handTimer)
+    this.handTimer = setTimeout(() => {
+      this.handTimer = null
+      this.startHand()
+    }, Math.max(0, this.revealEndsAt - Date.now()))
+    this.broadcast()
   }
 
   // ==== Chat ====
@@ -927,7 +990,11 @@ export class Room {
 
   startHand() {
     this.clearTimers()
-    this.revealed = new Set()
+    this.revealed = new Map()
+    this.revealDeclined = new Set()
+    this.handEndsAt = null
+    this.revealEndsAt = null
+    this.revealDurationMs = null
     const eligible = this.eligiblePlayers()
     if (this.phase !== 'playing' || eligible.length < CONFIG.MIN_PLAYERS) {
       this.endGame(eligible)
@@ -1024,7 +1091,7 @@ export class Room {
     // winners show their cards, while a folded AI keeps them face-down.
     for (const ep of this.engine.players) {
       if (!ep.isBot || ep.folded) continue
-      this.revealed.add(ep.id)
+      this.revealed.set(ep.id, ep.hole.map((_, i) => i))
     }
     // Winner bots boast; a bot that just busted out sends its farewell. Bots
     // that lost but still have chips stay quiet.
@@ -1063,11 +1130,17 @@ export class Room {
     }
     if (eventSubject) this.triggerEventBanter(eventSubject, eventType)
     this.broadcast()
-    // Show the result for a while, then start the next hand
+    // Reveal window: players have up to REVEAL_WINDOW_MS to decide whether and
+    // which cards to show. The next hand starts much earlier once everyone
+    // eligible has decided (or right past the floor when nobody has a choice).
+    this.handEndsAt = Date.now()
+    this.revealEndsAt = this.handEndsAt + CONFIG.REVEAL_WINDOW_MS
+    this.revealDurationMs = CONFIG.REVEAL_WINDOW_MS
     this.handTimer = setTimeout(() => {
       this.handTimer = null
       this.startHand()
-    }, CONFIG.HAND_END_PAUSE_MS)
+    }, CONFIG.REVEAL_WINDOW_MS)
+    this.maybeAdvanceAfterReveal()
   }
 
   // ==== Actions ====

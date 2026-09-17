@@ -130,8 +130,15 @@ export default function App() {
     })
   }, [])
 
-  const reveal = useCallback(() => {
-    socket.emit('game:reveal', {}, (res) => {
+  // cards: array of hole-card indices to show (e.g. [0], [1], [0, 1])
+  const reveal = useCallback((cards) => {
+    socket.emit('game:reveal', { cards }, (res) => {
+      if (res && !res.ok) setNotice(res.error)
+    })
+  }, [])
+
+  const declineReveal = useCallback(() => {
+    socket.emit('game:reveal', { decline: true }, (res) => {
       if (res && !res.ok) setNotice(res.error)
     })
   }, [])
@@ -188,7 +195,15 @@ export default function App() {
   return (
     <>
       {inGame ? (
-        <GameTable state={state} onAction={act} onRebuy={rebuy} onReveal={reveal} onChat={sendChat} onLeave={leave} />
+        <GameTable
+          state={state}
+          onAction={act}
+          onRebuy={rebuy}
+          onReveal={reveal}
+          onDeclineReveal={declineReveal}
+          onChat={sendChat}
+          onLeave={leave}
+        />
       ) : (
         <RoomLobby state={state} onStart={startGame} onAddBot={addBot} onRebuy={rebuy} onKick={kick} onChat={sendChat} onLeave={leave} onSpectate={spectate} />
       )}

@@ -96,9 +96,12 @@ io.on('connection', (socket) => {
     if (r) cb(r.rebuy(me()))
   })
 
-  socket.on('game:reveal', (_data, cb = () => {}) => {
+  // data: { cards: [0] | [1] | [0, 1] } to show specific hole cards,
+  //       or { decline: true } to keep the hand hidden
+  socket.on('game:reveal', (data = {}, cb = () => {}) => {
     const r = needRoom(cb)
-    if (r) cb(r.reveal(me()))
+    if (!r) return
+    cb(data && data.decline ? r.declineReveal(me()) : r.reveal(me(), data))
   })
 
   socket.on('room:sit', (_data, cb = () => {}) => {

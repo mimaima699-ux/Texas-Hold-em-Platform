@@ -6,7 +6,7 @@ import ChatBox from './ChatBox.jsx'
 import { PHASE_NAMES, tableLayout } from '../lib.js'
 
 // Main game screen: table + seats + community cards + action bar + log.
-export default function GameTable({ state, onAction, onRebuy, onReveal, onChat, onLeave }) {
+export default function GameTable({ state, onAction, onRebuy, onReveal, onDeclineReveal, onChat, onLeave }) {
   const { room, game } = state
   const youId = room.youId
   const players = game?.players ?? []
@@ -105,8 +105,11 @@ export default function GameTable({ state, onAction, onRebuy, onReveal, onChat, 
         smallBlind={room.smallBlind}
         onAction={onAction}
         onReveal={onReveal}
+        onDeclineReveal={onDeclineReveal}
         endsAt={room.turnEndsAt}
         duration={room.turnDurationMs}
+        revealEndsAt={room.revealEndsAt}
+        revealDurationMs={room.revealDurationMs}
       />
 
       <ChatBox chat={state.chat} onSend={onChat} />

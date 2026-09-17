@@ -1,10 +1,22 @@
 import { useEffect, useState } from 'react'
 import { useCountdown } from './Seat.jsx'
+import { rankText, SUIT_LABEL } from '../lib.js'
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
 
 // Bottom action bar: shows Fold/Check/Call/Raise when it's your turn.
-export default function ActionBar({ game, bigBlind, smallBlind, onAction, onReveal, endsAt, duration }) {
+export default function ActionBar({
+  game,
+  bigBlind,
+  smallBlind,
+  onAction,
+  onReveal,
+  onDeclineReveal,
+  endsAt,
+  duration,
+  revealEndsAt,
+  revealDurationMs,
+}) {
   const you = game?.you
   const isMyTurn = !!you && game.currentTurn === you.id && game.phase !== 'handEnd'
 
@@ -16,7 +28,15 @@ export default function ActionBar({ game, bigBlind, smallBlind, onAction, onReve
     )
   }
   if (game.phase === 'handEnd') {
-    return <RevealBar you={you} onReveal={onReveal} />
+    return (
+      <RevealBar
+        you={you}
+        onReveal={onReveal}
+        onDecline={onDeclineReveal}
+        endsAt={revealEndsAt}
+        duration={revealDurationMs}
+      />
+    )
   }
   if (you.folded) {
     return (
@@ -46,34 +66,50 @@ export default function ActionBar({ game, bigBlind, smallBlind, onAction, onReve
   )
 }
 
-function RevealBar({ you, onReveal }) {
-  if (you.folded) {
-    return (
-      <div className="action-bar">
-        <div className="action-hint">Hand over — you folded this hand</div>
-      </div>
+const cardText = (c) => (c ? `${rankText(c.rank)}${SUIT_LABEL[c.suit]}` : '')
+
+// Hand-end bar: choose whether to show your hole cards — one specific card,
+// both, or none — while the reveal-window countdown runs. Folded players get
+// the same choice (show the bluff!); their decision just doesn't hold up the
+// table.
+function RevealBar({ you, onReveal, onDecline, endsAt, duration }) {
+  const remaining = useCountdown(endsAt || 0)
+  const revealed = you.revealedCards ?? []
+  const hidden = you.hole.map((c, i) => ({ c, i })).filter(({ i }) => !revealed.includes(i))
+
+  let body
+  if (revealed.length >= you.hole.length) {
+    body = <div className="action-hint">You showed your hand ({you.hole.map(cardText).join(' ')})</div>
+  } else if (you.revealDeclined) {
+    body = <div className="action-hint">You kept your hand hidden</div>
+  } else {
+    body = (
+      <>
+        {hidden.map(({ c, i }) => (
+          <button key={i} className="btn btn-reveal" onClick={() => onReveal([i])}>
+            👀 Show {cardText(c)}
+          </button>
+        ))}
+        {hidden.length > 1 ? (
+          <button className="btn btn-reveal" onClick={() => onReveal(you.hole.map((_, i) => i))}>
+            👀 Show both
+          </button>
+        ) : null}
+        {revealed.length === 0 ? (
+          <button className="btn btn-fold" onClick={onDecline}>
+            🚫 Don't show
+          </button>
+        ) : null}
+      </>
     )
   }
-  if (you.canReveal) {
-    return (
-      <div className="action-bar reveal-bar">
-        <button className="btn btn-reveal" onClick={onReveal}>
-          👀 Show my hand
-        </button>
-        <span className="action-hint">Next hand starts soon…</span>
-      </div>
-    )
-  }
-  if (you.revealed) {
-    return (
-      <div className="action-bar">
-        <div className="action-hint">You showed your hand</div>
-      </div>
-    )
-  }
+
   return (
-    <div className="action-bar">
-      <div className="action-hint">Hand over — waiting for the next hand…</div>
+    <div className="action-bar reveal-bar">
+      {body}
+      <span className="action-hint">
+        {endsAt ? `Next hand in ${Math.ceil(remaining / 1000)}s` : 'Next hand starts soon…'}
+      </span>
     </div>
   )
 }

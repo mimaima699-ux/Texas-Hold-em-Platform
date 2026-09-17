@@ -1,8 +1,8 @@
 // Global constants and default configuration
 export const CONFIG = {
   PORT: Number(process.env.PORT) || 3001,
-  // Action timeout for human players (ms)
-  ACTION_TIMEOUT_MS: 30000,
+  // Action timeout for human players (ms) — their reaction window each turn
+  ACTION_TIMEOUT_MS: 60000,
   // Shortened timeout when the acting player has disconnected (ms)
   OFFLINE_ACTION_TIMEOUT_MS: 8000,
   // Turn window for a human in AFK mode — short, then auto-folds
@@ -21,9 +21,15 @@ export const CONFIG = {
   LLM_TIMEOUT_MS: Number(process.env.LLM_TIMEOUT_MS) || 12000, // per-request timeout
   // Visible turn window for LLM bots (they need a few seconds to think)
   LLM_TURN_MS: Number(process.env.LLM_TURN_MS) || 14000,
-  // Display time between end of a hand and the start of the next (ms).
-  // This is also the reveal window — players can choose to show their hand here.
+  // Minimum result display time between end of a hand and the start of the
+  // next (ms). The gap can stretch up to REVEAL_WINDOW_MS while players decide
+  // whether to show their cards; it snaps back to this floor once everyone
+  // eligible has decided (revealed or declined).
   HAND_END_PAUSE_MS: 5000,
+  // Reveal window: how long after a hand ends players have to choose whether
+  // to show their hole cards (one card, both, or none). The next hand starts
+  // early once every human contestant has made their choice.
+  REVEAL_WINDOW_MS: 60000,
   // Default room settings
   DEFAULT_STARTING_CHIPS: 100,
   DEFAULT_SMALL_BLIND: 5,
